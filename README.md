@@ -1,5 +1,5 @@
 <p align="center">
-  https://i.imgur.com/AJZPQ0F.png
+  <img src="https://i.imgur.com/AJZPQ0F.png">
 </p>
 
 # DarkNews
