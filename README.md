@@ -1,5 +1,5 @@
 <p align="center">
-  [[<img src="[https://imgur.com/AJZPQ0F](https://i.imgur.com/AJZPQ0F.png)" width="250" height="400" />](https://i.imgur.com/AJZPQ0F.png)](https://i.imgur.com/AJZPQ0F.png)
+  https://i.imgur.com/AJZPQ0F.png
 </p>
 
 # DarkNews
