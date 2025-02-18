@@ -12,8 +12,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20" # Escolha uma versão válida do Node.js
+          node-version: "lts/hydrogen"
 
       - run: npm ci
 
-      - run: npm test # Corrigindo o comando de teste
+      - run: npm test
