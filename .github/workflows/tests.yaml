@@ -1,15 +1,19 @@
 name: Automated Tests
+
 on: pull_request
+
 jobs:
-  jest: Jest Ubuntu
-  runs-on: ubuntu-latest
-  steps:
-    - uses: action/checkout@v4
+  jest:
+    name: Jest Ubuntu
+    runs-on: ubuntu-latest
 
-    - uses: actions/setup-node@v4
-      with:
-        node-version: "ts/hydrogen"
+    steps:
+      - uses: actions/checkout@v4
 
-    - run: npm ci
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20" # Escolha uma versão válida do Node.js
 
-    - run: git test
+      - run: npm ci
+
+      - run: npm test # Corrigindo o comando de teste
