@@ -1,0 +1,15 @@
+name: Automated Tests
+on: pull_request
+jobs:
+  jest: Jest Ubuntu
+  runs-on: ubuntu-latest
+  steps:
+    - uses: action/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "ts/hydrogen"
+
+    - run: npm ci
+
+    - run: git test
