@@ -1,15 +1,15 @@
 {
   "name": "clone-tabnews",
   "version": "1.0.0",
-  "description": "Uma implementação do projeto [TabNews](https://tabnews.com.br) para o curso [Curso.Dev](https://curso.dev).",
+  "description": "Uma implementação do projeto [TabNgews](https://tabnews.com.br) para o curso [Curso.Dev](https://curso.dev).",
   "main": "index.js",
   "scripts": {
     "dev": "npm run services:up && npm run wait-for-postgres && npm run migration:up && next dev",
     "services:up": "docker compose -f infra/compose.yml up -d",
     "services:stop": "docker compose -f infra/compose.yml stop",
     "services:down": "docker compose -f infra/compose.yml down",
-    "lint:check": "prettier --check .",
-    "lint:fix": "prettier --write .",
+    "lint:prettier:check": "prettier --check .",
+    "lint:prettier:fix": "prettier --write .",
     "test": "npm run services:up && npm run wait-for-postgres && concurrently --n next,jest --hide next -k --s command-jest \"next dev\" \"jest --runInBand\"",
     "test:watch": "jest --runInBand --watchAll",
     "migration:create": "node-pg-migrate --migrations-dir infra/migrations create",
