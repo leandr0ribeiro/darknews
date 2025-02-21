@@ -1,6 +1,6 @@
 import orchestrator from "tests/orchestrator";
 
-beforeAll(async() =>{
+beforeAll(async () => {
   await orchestrator.waitForAllServices();
 });
 
