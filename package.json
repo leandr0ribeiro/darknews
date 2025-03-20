@@ -1,7 +1,7 @@
 {
-  "name": "clone-tabnews",
+  "name": "DarkNews",
   "version": "1.0.0",
-  "description": "Uma implementação do projeto [TabNgews](https://tabnews.com.br) para o curso [Curso.Dev](https://curso.dev).",
+  "description": "DarkNews uma aplicação para divulgação de noticias e discussões de assuntos de Cybersegurança.",
   "main": "index.js",
   "scripts": {
     "dev": "npm run services:up && npm run services:wait:database && npm run migrations:up && next dev",
@@ -34,7 +34,8 @@
     "npm-check-updates": "^17.1.15",
     "pg": "8.14.0",
     "react": "19.0.0",
-    "react-dom": "19.0.0"
+    "react-dom": "19.0.0",
+    "swr": "2.2.5"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.8.0",
