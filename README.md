@@ -26,5 +26,5 @@ Este repositório contém uma implementação do projeto DarkNews, com o objetiv
 1. **Fork este repositório**.
 2. **Clone o repositório forkado**:
    ```sh
-   git clone https://github.com/seu-usuario/clone-tabnews.git
+   git clone https://github.com/leandr0ribeiro/darknews.git
    ```
