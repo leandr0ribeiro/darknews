@@ -1,0 +1,33 @@
+name: Security Pipeline
+
+on:
+  pull_request:
+
+jobs:
+  trivy-sast-sca:
+    name: Run Trivy SAST and SCA
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # SAST - Análise do código fonte (arquivos do repo)
+      - name: Run Trivy SAST (Filesystem scan)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH,MEDIUM
+
+      # SCA - Análise de dependências (SBOM)
+      - name: Run Trivy SCA (SBOM scan)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: sbom
+          sbom-source: .
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH,MEDIUM
