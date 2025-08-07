@@ -17,7 +17,7 @@ describe("GET /api/v1/users/[username]", () => {
         },
         body: JSON.stringify({
           username: "MesmoCase",
-          email: "mesmo.case@abc.com.br",
+          email: "mesmo.case@curso.dev",
           password: "senha123",
         }),
       });
@@ -33,8 +33,8 @@ describe("GET /api/v1/users/[username]", () => {
       expect(response2Body).toEqual({
         id: response2Body.id,
         username: "MesmoCase",
-        email: "mesmo.case@abc.com.br",
-        password: "senha123",
+        email: "mesmo.case@curso.dev",
+        password: response2Body.password,
         created_at: response2Body.created_at,
         updated_at: response2Body.updated_at,
       });
@@ -51,7 +51,7 @@ describe("GET /api/v1/users/[username]", () => {
         },
         body: JSON.stringify({
           username: "CaseDiferente",
-          email: "case.diferente@abc.com.br",
+          email: "case.diferente@curso.dev",
           password: "senha123",
         }),
       });
@@ -69,8 +69,8 @@ describe("GET /api/v1/users/[username]", () => {
       expect(response2Body).toEqual({
         id: response2Body.id,
         username: "CaseDiferente",
-        email: "case.diferente@abc.com.br",
-        password: "senha123",
+        email: "case.diferente@curso.dev",
+        password: response2Body.password,
         created_at: response2Body.created_at,
         updated_at: response2Body.updated_at,
       });
