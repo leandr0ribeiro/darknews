@@ -86,6 +86,15 @@ describe("POST /api/v1/users", () => {
             password: "senha123",
           }),
         });
+
+        expect(response3.status).toBe(400);
+        const response3Body = await response3.json();
+        expect(response3Body).toEqual({
+          name: "ValidationError",
+          message: "O usuario informado já está sendo utilizado.",
+          action: "Utilize outro usuario para realizar esta operação.",
+          status_code: 400,
+        });
       });
     });
   });
