@@ -7,7 +7,7 @@
 O DarkNews é um site dedicado à comunidade hacker e de segurança cibernética, projetado para fomentar debates e a troca de conhecimentos através de publicações e comentários gerados pelos próprios usuários.
 
 Este repositório contém o código-fonte do site e da API do DarkNews. 
-
+ 
 O DarkNews oferece APIs públicas que podem ser utilizadas para desenvolver outros projetos relacionados a ele, desde que os Termos de Uso sejam respeitados.
 
 ## Descrição
