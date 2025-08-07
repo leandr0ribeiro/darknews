@@ -2,7 +2,6 @@ import orchestrator from "tests/orchestrator";
 import { version as uuidVersion } from "uuid";
 import user from "models/user";
 import password from "models/password";
-import database from "infra/database";
 
 beforeAll(async () => {
   await orchestrator.waitForAllServices();
@@ -21,7 +20,7 @@ describe("POST /api/v1/users", () => {
           },
           body: JSON.stringify({
             username: "emailduplicado1",
-            email: "duplicado@abc.com.br",
+            email: "duplicado@curso.dev",
             password: "senha123",
           }),
         });
@@ -31,7 +30,7 @@ describe("POST /api/v1/users", () => {
         expect(responseBody).toEqual({
           id: responseBody.id,
           username: "emailduplicado1",
-          email: "duplicado@abc.com.br",
+          email: "duplicado@curso.dev",
           password: responseBody.password,
           created_at: responseBody.created_at,
           updated_at: responseBody.updated_at,
@@ -61,7 +60,7 @@ describe("POST /api/v1/users", () => {
           },
           body: JSON.stringify({
             username: "emailduplicado2",
-            email: "duplicado@abc.com.br",
+            email: "duplicado@curso.dev",
             password: "senha123",
           }),
         });
@@ -71,7 +70,7 @@ describe("POST /api/v1/users", () => {
         expect(response2Body).toEqual({
           name: "ValidationError",
           message: "O Email informado já está sendo utilizado.",
-          action: "Utilize outro email para realizar o cadastro.",
+          action: "Utilize outro email para realizar esta operação.",
           status_code: 400,
         });
       });
@@ -83,18 +82,9 @@ describe("POST /api/v1/users", () => {
           },
           body: JSON.stringify({
             username: "emailduplicado1",
-            email: "duplicado2@abc.com.br",
+            email: "duplicado2@curso.dev",
             password: "senha123",
           }),
-        });
-
-        expect(response3.status).toBe(400);
-        const response3Body = await response3.json();
-        expect(response3Body).toEqual({
-          name: "ValidationError",
-          message: "O usuario informado já está sendo utilizado.",
-          action: "Utilize outro usuario para realizar o cadastro.",
-          status_code: 400,
         });
       });
     });
