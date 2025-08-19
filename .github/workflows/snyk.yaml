@@ -1,0 +1,35 @@
+name: Security Pipeline
+
+on:
+  pull_request:
+
+jobs:
+  snyk-sca:
+    name: Run Snyk SCA
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Snyk to check for vulnerabilities (SCA)
+        uses: snyk/actions/node@mastergi
+        with:
+          args: test --all-projects --severity-threshold=medium
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+  snyk-code:
+    name: Run Snyk Code (SAST)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Snyk Code scan
+        uses: snyk/actions/node@master
+        with:
+          args: code test --severity-threshold=medium
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
