@@ -1,7 +1,8 @@
 name: Security Pipeline
 
 on:
-  pull_request:
+  push: # roda em todas as branches
+  pull_request: # e em PRs
 
 permissions:
   contents: read
@@ -15,11 +16,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Install Snyk CLI
       - name: Setup Snyk CLI
         uses: snyk/actions/setup@master
 
-      # HTML converter for reports
       - name: Install snyk-to-html
         run: npm install -g snyk-to-html
 
@@ -30,14 +29,16 @@ jobs:
           mkdir -p reports
           snyk test --all-projects --severity-threshold=medium \
             --json-file-output=reports/snyk-sca.json || true
+          snyk-to-html -i reports/snyk-sca.json -o reports/snyk-sca.html || true
 
-      - name: Convert SCA JSON -> HTML
+      # >>> envia snapshot pro Snyk UI e marca por branch <<<
+      - name: Snyk monitor (SCA) -> UI (by branch)
+        if: always()
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          if [ -f reports/snyk-sca.json ]; then
-            snyk-to-html -i reports/snyk-sca.json -o reports/snyk-sca.html
-          else
-            echo "<html><body><h3>No SCA issues found</h3></body></html>" > reports/snyk-sca.html
-          fi
+          snyk monitor --all-projects \
+            --target-reference="${{ github.ref_name }}" || true
 
       - name: Upload SCA reports
         uses: actions/upload-artifact@v4
@@ -59,16 +60,13 @@ jobs:
       - name: Install snyk-to-html
         run: npm install -g snyk-to-html
 
-      - name: Snyk Code test -> JSON
+      - name: Snyk Code test -> JSON/HTML (local reports)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           mkdir -p reports
           snyk code test --severity-threshold=medium \
             --json-file-output=reports/snyk-code.json || true
-
-      - name: Convert Code JSON -> HTML
-        run: |
           if [ -f reports/snyk-code.json ]; then
             snyk-to-html -i reports/snyk-code.json -o reports/snyk-code.html
           else
