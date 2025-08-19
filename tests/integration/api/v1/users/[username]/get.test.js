@@ -14,7 +14,7 @@ describe("GET /api/v1/users/[username]", () => {
         username: "MesmoCase",
         email: "mesmo.case@curso.dev",
       });
-   
+
       const response2 = await fetch(
         "http://localhost:3000/api/v1/users/MesmoCase",
       );
@@ -36,13 +36,13 @@ describe("GET /api/v1/users/[username]", () => {
       expect(Date.parse(response2Body.created_at)).not.toBeNaN();
       expect(Date.parse(response2Body.updated_at)).not.toBeNaN();
     });
+
     test("With case mismatch", async () => {
       await orchestrator.createUser({
         username: "CaseDiferente",
         email: "case.diferente@curso.dev",
         password: "senha123",
       });
-
 
       const response2 = await fetch(
         "http://localhost:3000/api/v1/users/casediferente",
@@ -63,6 +63,7 @@ describe("GET /api/v1/users/[username]", () => {
       expect(Date.parse(response2Body.created_at)).not.toBeNaN();
       expect(Date.parse(response2Body.updated_at)).not.toBeNaN();
     });
+
     test("With nonexistent username", async () => {
       const response = await fetch(
         "http://localhost:3000/api/v1/users/UsuarioInexistente",
