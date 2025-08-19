@@ -1,0 +1,82 @@
+name: Security Pipeline
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  snyk-sca:
+    name: Snyk Open Source (SCA)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install Snyk CLI
+      - name: Setup Snyk CLI
+        uses: snyk/actions/setup@master
+
+      # HTML converter for reports
+      - name: Install snyk-to-html
+        run: npm install -g snyk-to-html
+
+      - name: Snyk test (SCA) -> JSON
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          mkdir -p reports
+          snyk test --all-projects --severity-threshold=medium \
+            --json-file-output=reports/snyk-sca.json || true
+
+      - name: Convert SCA JSON -> HTML
+        run: |
+          if [ -f reports/snyk-sca.json ]; then
+            snyk-to-html -i reports/snyk-sca.json -o reports/snyk-sca.html
+          else
+            echo "<html><body><h3>No SCA issues found</h3></body></html>" > reports/snyk-sca.html
+          fi
+
+      - name: Upload SCA reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-sca-reports
+          path: reports/*sca.*
+
+  snyk-code:
+    name: Snyk Code (SAST)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Snyk CLI
+        uses: snyk/actions/setup@master
+
+      - name: Install snyk-to-html
+        run: npm install -g snyk-to-html
+
+      - name: Snyk Code test -> JSON
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          mkdir -p reports
+          snyk code test --severity-threshold=medium \
+            --json-file-output=reports/snyk-code.json || true
+
+      - name: Convert Code JSON -> HTML
+        run: |
+          if [ -f reports/snyk-code.json ]; then
+            snyk-to-html -i reports/snyk-code.json -o reports/snyk-code.html
+          else
+            echo "<html><body><h3>No Snyk Code issues found</h3></body></html>" > reports/snyk-code.html
+          fi
+
+      - name: Upload Code reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-code-reports
+          path: reports/*code.*
