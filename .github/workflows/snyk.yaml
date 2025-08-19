@@ -33,3 +33,4 @@ jobs:
           args: code test --severity-threshold=medium
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
