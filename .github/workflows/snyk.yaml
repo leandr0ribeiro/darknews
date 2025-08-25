@@ -9,7 +9,7 @@ permissions:
 
 env:
   SEVERITY_THRESHOLD: medium # low|medium|high|critical
-  GRACE_PERIOD_DAYS: "1" # dias de carência
+  GRACE_PERIOD_DAYS: "15" # dias de carência
 
 jobs:
   snyk-sca:
