@@ -10,7 +10,7 @@ permissions:
 
 env:
   SEVERITY_THRESHOLD: medium # low|medium|high|critical
-  GRACE_PERIOD_DAYS: "1" # grace window for newly found issues in THIS project
+  GRACE_PERIOD_DAYS: "1" # grace window
 
 jobs:
   snyk-sca:
@@ -37,10 +37,10 @@ jobs:
           snyk-to-html -i reports/snyk-sca.json -o reports/snyk-sca.html || true
 
       # --- Grace period check (SCA) -------------------------------------------
-      # Policy:
-      # - Use ONLY project identification dates: firstSeen (preferred) -> introducedDate (fallback).
+      # Policy (SCA):
+      # - Compare PUBLIC timeline: disclosureTime (fallback: publicationTime)
       # - cutoff = today - GRACE_PERIOD_DAYS
-      # - Block if: severity >= threshold AND firstSeen <= cutoff (older than grace).
+      # - Block if: severity >= threshold AND disclosureTime <= cutoff (older than grace)
       - name: Grace period check (SCA)
         run: |
           set -euo pipefail
@@ -61,24 +61,23 @@ jobs:
             jq -r \
               --argjson cutoff "$cutoff" \
               --argjson thr "$thr" '
-              # map textual severity to numeric
+              # textual severity -> numeric
               def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
-              # ONLY project dates (no public disclosure dates)
-              def datefield: (.firstSeen // .introducedDate // "");
+              # >>> use disclosureTime (fallback: publicationTime) <<<
+              def datefield: (.disclosureTime // .publicationTime // "");
               [
                 .vulnerabilities[]?
                 | select(sevscore >= $thr)
                 | . as $v
-                # strip milliseconds like ".123Z", parse to epoch (null if missing/invalid)
+                # normalize millis and parse ISO; null stays null
                 | ( (datefield | gsub("\\.[0-9]+Z$"; "Z")) | fromdateiso8601? ) as $epoch
-                # older than grace -> violation
-                | select($epoch != null and $epoch <= $cutoff)
-                | {sev: $v.severity, pkg: $v.packageName, title: $v.title, firstSeen: (datefield), epoch: $epoch}
+                | select($epoch != null and $epoch <= $cutoff)   # older than grace -> violation
+                | {sev: $v.severity, pkg: $v.packageName, title: $v.title, disclosureTime: (datefield), epoch: $epoch}
               ]' reports/snyk-sca.json
           )
 
           if [ "$violations" != "[]" ]; then
-            echo "::error::SCA violations beyond ${{ env.GRACE_PERIOD_DAYS }} days:"
+            echo "::error::SCA violations beyond ${{ env.GRACE_PERIOD_DAYS }} day(s):"
             echo "$violations"
             exit 1
           fi
@@ -127,7 +126,10 @@ jobs:
           fi
 
       # --- Grace period check (SAST) ------------------------------------------
-      # Same policy as SCA, using firstSeen -> introducedDate when available.
+      # Policy (SAST):
+      # - Use project identification dates: firstSeen (preferred) -> introducedDate (fallback)
+      # - cutoff = today - GRACE_PERIOD_DAYS
+      # - Block if: severity >= threshold AND firstSeen <= cutoff
       - name: Grace period check (SAST)
         run: |
           set -euo pipefail
@@ -149,6 +151,7 @@ jobs:
               --argjson cutoff "$cutoff" \
               --argjson thr "$thr" '
               def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
+              # Snyk Code usually lacks disclosureTime; use project dates
               def datefield: (.firstSeen // .introducedDate // "");
               [
                 .issues[]?
@@ -161,7 +164,7 @@ jobs:
           )
 
           if [ "$violations" != "[]" ]; then
-            echo "::error::SAST violations beyond ${{ env.GRACE_PERIOD_DAYS }} days:"
+            echo "::error::SAST violations beyond ${{ env.GRACE_PERIOD_DAYS }} day(s):"
             echo "$violations"
             exit 1
           fi
