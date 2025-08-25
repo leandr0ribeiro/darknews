@@ -1,36 +1,168 @@
 name: Security Pipeline
 
 on:
-  pull_request:
+  push: # roda em todas as branches
+  pull_request: # e em PRs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # 👇 ajustes simples pra testar
+  SEVERITY_THRESHOLD: medium     # low|medium|high|critical
+  GRACE_PERIOD_DAYS: "14"        # dias de carência para novas vulnerabilidades
 
 jobs:
-  semgrep:
-    name: Run Semgrep SAST
+  snyk-sca:
+    name: Snyk Open Source (SCA)
     runs-on: ubuntu-latest
-
+    continue-on-error: true
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
+      - name: Setup Snyk CLI
+        uses: snyk/actions/setup@master
+
+      - name: Install snyk-to-html
+        run: npm install -g snyk-to-html
+
+      - name: Snyk test (SCA) -> JSON
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          mkdir -p reports
+          snyk test --all-projects --severity-threshold=${{ env.SEVERITY_THRESHOLD }} \
+            --json-file-output=reports/snyk-sca.json || true
+          snyk-to-html -i reports/snyk-sca.json -o reports/snyk-sca.html || true
+
+      # >>> GRACE PERIOD SCA (falha se houver issues >= threshold mais antigas que o grace) <<<
+      - name: Grace period check (SCA)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          set -e
+          if [ ! -f reports/snyk-sca.json ]; then
+            echo "No SCA JSON found (reports/snyk-sca.json)."
+            exit 0
+          fi
+
+          cutoff=$(date -d "-${{ env.GRACE_PERIOD_DAYS }} days" +%s)
+
+          # converte threshold textual em número
+          case "${{ env.SEVERITY_THRESHOLD }}" in
+            low) thr=0;;
+            medium) thr=1;;
+            high) thr=2;;
+            critical) thr=3;;
+            *) thr=2;;
+          esac
+
+          # filtra violações fora do grace (>= threshold e data <= cutoff)
+          violations=$(jq -r \
+            --argjson cutoff "$cutoff" \
+            --argjson thr "$thr" '
+            def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
+            def datefield: (.introducedDate // .firstSeen // .creationTime // .disclosureTime // .publicationTime);
+            [.vulnerabilities[]?
+              | select(sevscore >= $thr)
+              | {sev: .severity, pkg: .packageName, title: .title, d: (datefield), epoch: ( (datefield // "") | try (fromdateiso8601) catch null )}
+              | select(.epoch != null and .epoch <= $cutoff)
+            ]' reports/snyk-sca.json)
+
+          if [ "$violations" != "[]" ]; then
+            echo "::error::SCA violations beyond ${{
+              env.GRACE_PERIOD_DAYS }} days:"
+            echo "$violations"
+            exit 1
+          fi
+          echo "SCA within grace or below threshold.."
+
+      # >>> envia snapshot pro Snyk UI e marca por branch <<<
+      - name: Snyk monitor (SCA) -> UI (by branch)
+        if: always()
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk monitor --all-projects \
+            --target-reference="${{ github.ref_name }}" || true
+
+      - name: Upload SCA reports
+        uses: actions/upload-artifact@v4
         with:
-          config: "p/ci"
-          exit-code: 0
+          name: snyk-sca-reports
+          path: reports/*sca.*
 
-  trivy:
-    name: Run Trivy SCA + SAST
+  snyk-code:
+    name: Snyk Code (SAST)
     runs-on: ubuntu-latest
-
+    continue-on-error: true
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Trivy FS scan
-        uses: aquasecurity/trivy-action@master
+      - name: Setup Snyk CLI
+        uses: snyk/actions/setup@master
+
+      - name: Install snyk-to-html
+        run: npm install -g snyk-to-html
+
+      - name: Snyk Code test -> JSON/HTML (local reports)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          mkdir -p reports
+          snyk code test --severity-threshold=${{ env.SEVERITY_THRESHOLD }} \
+            --json-file-output=reports/snyk-code.json || true
+          if [ -f reports/snyk-code.json ]; then
+            snyk-to-html -i reports/snyk-code.json -o reports/snyk-code.html
+          else
+            echo "<html><body><h3>No Snyk Code issues found</h3></body></html>" > reports/snyk-code.html
+          fi
+
+      # >>> GRACE PERIOD SAST (falha se houver issues >= threshold mais antigas que o grace) <<<
+      - name: Grace period check (SAST)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          set -e
+          if [ ! -f reports/snyk-code.json ]; then
+            echo "No SAST JSON found (reports/snyk-code.json)."
+            exit 0
+          fi
+
+          cutoff=$(date -d "-${{ env.GRACE_PERIOD_DAYS }} days" +%s)
+
+          case "${{ env.SEVERITY_THRESHOLD }}" in
+            low) thr=0;;
+            medium) thr=1;;
+            high) thr=2;;
+            critical) thr=3;;
+            *) thr=2;;
+          esac
+
+          violations=$(jq -r \
+            --argjson cutoff "$cutoff" \
+            --argjson thr "$thr" '
+            def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
+            def datefield: (.introducedDate // .firstSeen // .creationTime // .disclosureTime // .publicationTime);
+            [.issues[]?
+              | select(sevscore >= $thr)
+              | {sev: .severity, rule: .ruleId, title: .title, d: (datefield), epoch: ( (datefield // "") | try (fromdateiso8601) catch null )}
+              | select(.epoch != null and .epoch <= $cutoff)
+            ]' reports/snyk-code.json)
+
+          if [ "$violations" != "[]" ]; then
+            echo "::error::SAST violations beyond ${{
+              env.GRACE_PERIOD_DAYS }} days:"
+            echo "$violations"
+            exit 1
+          fi
+          echo "SAST within grace or below threshold."
+
+      - name: Upload Code reports
+        uses: actions/upload-artifact@v4
         with:
-          scan-type: fs
-          scan-ref: .
-          exit-code: 0
-          ignore-unfixed: true
-          severity: CRITICAL,HIGH,MEDIUM
+          name: snyk-code-reports
+          path: reports/*code.*
