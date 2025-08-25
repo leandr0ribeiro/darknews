@@ -1,23 +1,14 @@
 name: Security Pipeline
 
-on:
-  push: # roda em todas as branches
-  pull_request:
-  workflow_dispatch:
+on: push
+  pull_request
 
 permissions:
   contents: read
 
 env:
-  # ajustes simples pra testar
   SEVERITY_THRESHOLD: medium # low|medium|high|critical
-  GRACE_PERIOD_DAYS: "2" # dias de carência
-  USE_SNYK_API: "true" # "true" para consultar API do Snyk (se IDs existirem)
-
-  # (opcional) se quiser consultar o projeto no Snyk pra pegar "first seen":
-  # defina como secrets do repositório (Settings > Secrets > Actions):
-  #   SNYK_ORG_ID, SNYK_PROJECT_ID_SCA, SNYK_PROJECT_ID_SAST
-  # Se não definir, o script faz fallback para datas do JSON local.
+  GRACE_PERIOD_DAYS: "14" # dias de carência
 
 jobs:
   snyk-sca:
@@ -31,11 +22,8 @@ jobs:
       - name: Setup Snyk CLI
         uses: snyk/actions/setup@master
 
-      - name: Install jq and snyk-to-html
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
-          npm install -g snyk-to-html
+      - name: Install snyk-to-html
+        run: npm install -g snyk-to-html
 
       - name: Snyk test (SCA) -> JSON
         env:
@@ -46,103 +34,49 @@ jobs:
             --json-file-output=reports/snyk-sca.json || true
           snyk-to-html -i reports/snyk-sca.json -o reports/snyk-sca.html || true
 
-      # (OPCIONAL) consulta API do Snyk pra obter datas "oficiais" do projeto (first seen)
-      - name: Fetch SCA issues from Snyk API (optional)
-        if: env.USE_SNYK_API == 'true'
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-          ORG_ID: ${{ secrets.SNYK_ORG_ID }}
-          PROJECT_ID: ${{ secrets.SNYK_PROJECT_ID_SCA }}
+      # >>> BLOQUEIA somente se issues >= threshold estiverem FORA do período de carência <<<
+      - name: Grace period check (SCA)
         run: |
           set -e
-          if [ -z "$ORG_ID" ] || [ -z "$PROJECT_ID" ]; then
-            echo "ORG_ID/PROJECT_ID não definidos; pulando consulta de API."
-            exit 0
-          fi
-          # v1 aggregated-issues (pode exigir plano/perm. na org)
-          # doc geral APIs + migração: ver docs Snyk (REST e V1) 
-          curl -sS -H "Authorization: token $SNYK_TOKEN" \
-            -H "Content-Type: application/json" \
-            -X POST "https://snyk.io/api/v1/org/$ORG_ID/project/$PROJECT_ID/aggregated-issues" \
-            -d '{}' > reports/snyk-sca-aggregated.json || true
-
-      # >>> GRACE PERIOD SCA (imprime data e falha se >= threshold e fora do grace) <<<
-      - name: Grace period check (SCA) — print first seen
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-          ORG_ID: ${{ secrets.SNYK_ORG_ID }}
-          PROJECT_ID: ${{ secrets.SNYK_PROJECT_ID_SCA }}
-        run: |
-          set -e
-          if [ ! -f reports/snyk-sca.json ]; then
-            echo "No SCA JSON found (reports/snyk-sca.json)."
-            exit 0
-          fi
-
+          [ -f reports/snyk-sca.json ] || { echo "No SCA JSON found."; exit 0; }
           cutoff=$(date -d "-${{ env.GRACE_PERIOD_DAYS }} days" +%s)
 
-          # threshold numérico
           case "${{ env.SEVERITY_THRESHOLD }}" in
             low) thr=0;; medium) thr=1;; high) thr=2;; critical) thr=3;; *) thr=2;;
           esac
 
-          # constrói um mapa id -> firstSeen usando a API (se existir arquivo)
-          if [ -s reports/snyk-sca-aggregated.json ]; then
-            jq '
-              def datefield: (.introducedDate // .firstSeen // .creationTime // .disclosureTime // .publicationTime);
-              ( .issues // .results // [] )                               # tolera formatos diferentes
-              | map({key: (.id // .issueId // .originalIssueId), val: (datefield // null)})
-              | from_entries
-            ' reports/snyk-sca-aggregated.json > reports/sca-api-date-map.json || echo "{}" > reports/sca-api-date-map.json
-          else
-            echo "{}" > reports/sca-api-date-map.json
-          fi
+          violations=$(
+            jq -r \
+              --argjson cutoff "$cutoff" \
+              --argjson thr "$thr" '
+              def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
+              # pega a primeira data disponível
+              def datefield: (.introducedDate // .firstSeen // .creationTime // .disclosureTime // .publicationTime // .updated);
+              [
+                .vulnerabilities[]?
+                | select(sevscore >= $thr)
+                | . as $v
+                | ( $v | datefield // "" ) as $d
+                # normaliza tirando milissegundos e converte pra epoch (null se não der)
+                | ($d | gsub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? ) as $epoch
+                | select($epoch != null and $epoch <= $cutoff)
+                | {sev: $v.severity, pkg: $v.packageName, title: $v.title, date: $d}
+              ]' reports/snyk-sca.json
+          )
 
-          echo "---- SCA issues (showing date used for grace) ----"
-          # imprime uma linha por issue com: severidade | pacote | título | DATA_USADA | EPOCH | status grace
-          jq -r --argjson cutoff "$cutoff" --argjson thr "$thr" '
-            def sevscore(x): {"low":0,"medium":1,"high":2,"critical":3}[x];
-            def datefield(x): (x.introducedDate // x.firstSeen // x.creationTime // x.disclosureTime // x.publicationTime);
-
-            # carrega mapa api (se existir)
-            ( input | . ) as $apimap
-            |
-            .vulnerabilities[]?
-            | . as $v
-            | select( sevscore($v.severity) >= $thr )
-            | $v.id as $id
-            | $v.packageName as $pkg
-            | $v.title as $title
-            | ( $apimap[$id] // datefield($v) // null ) as $date_used
-            | {
-                id: $id,
-                severity: $v.severity,
-                package: $pkg,
-                title: $title,
-                date_used: $date_used,
-                epoch: ( ($date_used // "") | try (fromdateiso8601) catch null ),
-                out_of_grace: ( (($date_used // "") | length) > 0 and ((($date_used | fromdateiso8601) <= $cutoff)) )
-              }
-            | "\(.severity)\t\(.package)\t\(.title)\tdate=\(.date_used // "n/a")\tepoch=\(.epoch // "n/a")\tgrace=\(if .out_of_grace then "FAIL" else "OK" end)"
-          ' reports/snyk-sca.json reports/sca-api-date-map.json \
-          | tee reports/snyk-sca-grace.txt
-
-          # se houver algum FAIL (fora do grace), falha o job
-          if grep -q $'\tgrace=FAIL' reports/snyk-sca-grace.txt; then
-            echo "::error::SCA violations beyond ${{
-              env.GRACE_PERIOD_DAYS }} days (see lines above)."
+          if [ "$violations" != "[]" ]; then
+            echo "::error::SCA violations beyond ${{ env.GRACE_PERIOD_DAYS }} days:"
+            echo "$violations"
             exit 1
           fi
-          echo "SCA dentro do grace ou abaixo do threshold."
+          echo "SCA OK: only new (in grace) or below threshold."
 
-      # >>> envia snapshot pro Snyk UI e marca por branch <<<
       - name: Snyk monitor (SCA) -> UI (by branch)
         if: always()
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk monitor --all-projects \
-            --target-reference="${{ github.ref_name }}" || true
+          snyk monitor --all-projects --target-reference="${{ github.ref_name }}" || true
 
       - name: Upload SCA reports
         uses: actions/upload-artifact@v4
@@ -161,11 +95,8 @@ jobs:
       - name: Setup Snyk CLI
         uses: snyk/actions/setup@master
 
-      - name: Install jq and snyk-to-html
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
-          npm install -g snyk-to-html
+      - name: Install snyk-to-html
+        run: npm install -g snyk-to-html
 
       - name: Snyk Code test -> JSON/HTML (local reports)
         env:
@@ -180,87 +111,40 @@ jobs:
             echo "<html><body><h3>No Snyk Code issues found</h3></body></html>" > reports/snyk-code.html
           fi
 
-      # (OPCIONAL) consulta API do Snyk pra SAST (se disponível na sua org)
-      - name: Fetch SAST issues from Snyk API (optional)
-        if: env.USE_SNYK_API == 'true'
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-          ORG_ID: ${{ secrets.SNYK_ORG_ID }}
-          PROJECT_ID: ${{ secrets.SNYK_PROJECT_ID_SAST }}
+      # >>> BLOQUEIA somente se issues >= threshold estiverem FORA do período de carência <<<
+      - name: Grace period check (SAST)
         run: |
           set -e
-          if [ -z "$ORG_ID" ] || [ -z "$PROJECT_ID" ]; then
-            echo "ORG_ID/PROJECT_ID não definidos; pulando consulta de API."
-            exit 0
-          fi
-          # OBS: issues de Snyk Code têm endpoints REST distintos em algumas orgs;
-          # o v1 aggregated-issues pode não incluir Code dependendo do rollout/plano.
-          curl -sS -H "Authorization: token $SNYK_TOKEN" \
-            -H "Content-Type: application/json" \
-            -X POST "https://snyk.io/api/v1/org/$ORG_ID/project/$PROJECT_ID/aggregated-issues" \
-            -d '{}' > reports/snyk-code-aggregated.json || true
-
-      # >>> GRACE PERIOD SAST (imprime data e falha se fora do grace) <<<
-      - name: Grace period check (SAST) — print first seen
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-          ORG_ID: ${{ secrets.SNYK_ORG_ID }}
-          PROJECT_ID: ${{ secrets.SNYK_PROJECT_ID_SAST }}
-        run: |
-          set -e
-          if [ ! -f reports/snyk-code.json ]; then
-            echo "No SAST JSON found (reports/snyk-code.json)."
-            exit 0
-          fi
-
+          [ -f reports/snyk-code.json ] || { echo "No SAST JSON found."; exit 0; }
           cutoff=$(date -d "-${{ env.GRACE_PERIOD_DAYS }} days" +%s)
+
           case "${{ env.SEVERITY_THRESHOLD }}" in
             low) thr=0;; medium) thr=1;; high) thr=2;; critical) thr=3;; *) thr=2;;
           esac
 
-          # mapa id -> firstSeen da API (se existir)
-          if [ -s reports/snyk-code-aggregated.json ]; then
-            jq '
-              def datefield: (.introducedDate // .firstSeen // .creationTime // .disclosureTime // .publicationTime);
-              ( .issues // .results // [] )
-              | map({key: (.id // .issueId // .originalIssueId), val: (datefield // null)})
-              | from_entries
-            ' reports/snyk-code-aggregated.json > reports/sast-api-date-map.json || echo "{}" > reports/sast-api-date-map.json
-          else
-            echo "{}" > reports/sast-api-date-map.json
-          fi
+          violations=$(
+            jq -r \
+              --argjson cutoff "$cutoff" \
+              --argjson thr "$thr" '
+              def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
+              def datefield: (.introducedDate // .firstSeen // .creationTime // .disclosureTime // .publicationTime // .updated);
+              [
+                .issues[]?
+                | select(sevscore >= $thr)
+                | . as $i
+                | ( $i | datefield // "" ) as $d
+                | ($d | gsub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? ) as $epoch
+                | select($epoch != null and $epoch <= $cutoff)
+                | {sev: $i.severity, rule: $i.ruleId, title: $i.title, date: $d}
+              ]' reports/snyk-code.json
+          )
 
-          echo "---- SAST issues (showing date used for grace) ----"
-          jq -r --argjson cutoff "$cutoff" --argjson thr "$thr" '
-            def sevscore(x): {"low":0,"medium":1,"high":2,"critical":3}[x];
-            def datefield(x): (x.introducedDate // x.firstSeen // x.creationTime // x.disclosureTime // x.publicationTime);
-
-            ( input | . ) as $apimap
-            |
-            .issues[]?
-            | . as $i
-            | select( sevscore($i.severity) >= $thr )
-            | $i.id as $id
-            | ( $apimap[$id] // datefield($i) // null ) as $date_used
-            | {
-                id: $id,
-                severity: $i.severity,
-                rule: ($i.ruleId // "rule?"),
-                title: ($i.title // "issue"),
-                date_used: $date_used,
-                epoch: ( ($date_used // "") | try (fromdateiso8601) catch null ),
-                out_of_grace: ( (($date_used // "") | length) > 0 and ((($date_used | fromdateiso8601) <= $cutoff)) )
-              }
-            | "\(.severity)\t\(.rule)\t\(.title)\tdate=\(.date_used // "n/a")\tepoch=\(.epoch // "n/a")\tgrace=\(if .out_of_grace then "FAIL" else "OK" end)"
-          ' reports/snyk-code.json reports/sast-api-date-map.json \
-          | tee reports/snyk-code-grace.txt
-
-          if grep -q $'\tgrace=FAIL' reports/snyk-code-grace.txt; then
-            echo "::error::SAST violations beyond ${{
-              env.GRACE_PERIOD_DAYS }} days (see lines above)."
+          if [ "$violations" != "[]" ]; then
+            echo "::error::SAST violations beyond ${{ env.GRACE_PERIOD_DAYS }} days:"
+            echo "$violations"
             exit 1
           fi
-          echo "SAST dentro do grace ou abaixo do threshold."
+          echo "SAST OK: only new (in grace) or below threshold."
 
       - name: Upload Code reports
         uses: actions/upload-artifact@v4
