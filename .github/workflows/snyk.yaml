@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 env:
-  SEVERITY_THRESHOLD: medium # low|medium|high|critical
-  GRACE_PERIOD_DAYS: "15" # grace window
+  SEVERITY_THRESHOLD: medium # <- not used in grace checks; kept for scans/UI
+  GRACE_PERIOD_DAYS: "15" # grace window (days)
 
 jobs:
   snyk-sca:
@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
+      # --- Setup -------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -27,6 +28,7 @@ jobs:
       - name: Install snyk-to-html
         run: npm install -g snyk-to-html
 
+      # --- Scan (SCA) --------------------------------------------------------
       - name: Snyk test (SCA) -> JSON
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -36,11 +38,11 @@ jobs:
             --json-file-output=reports/snyk-sca.json || true
           snyk-to-html -i reports/snyk-sca.json -o reports/snyk-sca.html || true
 
-      # --- Grace period check (SCA) -------------------------------------------
+      # --- Grace period check (SCA) ------------------------------------------
       # Policy (SCA):
       # - Compare PUBLIC timeline: disclosureTime (fallback: publicationTime)
       # - cutoff = today - GRACE_PERIOD_DAYS
-      # - Block if: severity >= threshold AND disclosureTime <= cutoff (older than grace)
+      # - Block if: disclosureTime <= cutoff (older than grace)
       - name: Grace period check (SCA)
         run: |
           set -euo pipefail
@@ -51,46 +53,37 @@ jobs:
 
           cutoff=$(date -d "-${{ env.GRACE_PERIOD_DAYS }} days" +%s)
           cutoff_iso=$(date -u -d "@$cutoff" +"%Y-%m-%dT%H:%M:%SZ")
-
-          case "${{ env.SEVERITY_THRESHOLD }}" in
-            low) thr=0;; medium) thr=1;; high) thr=2;; critical) thr=3;; *) thr=2;;
-          esac
-          echo "SCA cutoff: $cutoff_iso (epoch=$cutoff) | threshold=${{ env.SEVERITY_THRESHOLD }}"
+          echo "SCA cutoff: $cutoff_iso (epoch=$cutoff)"
 
           violations=$(
             jq -r \
-              --argjson cutoff "$cutoff" \
-              --argjson thr "$thr" '
-              # textual severity -> numeric
-              def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
-              # >>> use disclosureTime (fallback: publicationTime) <<<
+              --argjson cutoff "$cutoff" '
+              # reference date for grace: disclosureTime (fallback: publicationTime)
               def datefield: (.disclosureTime // .publicationTime // "");
               [
                 .vulnerabilities[]?
-                | select(sevscore >= $thr)
                 | . as $v
-                # normalize millis and parse ISO; null stays null
+                # normalize millis and parse ISO8601 -> epoch (or null)
                 | ( (datefield | gsub("\\.[0-9]+Z$"; "Z")) | fromdateiso8601? ) as $epoch
                 | select($epoch != null and $epoch <= $cutoff)   # older than grace -> violation
-                | {sev: $v.severity, pkg: $v.packageName, title: $v.title, disclosureTime: (datefield), epoch: $epoch}
+                | {pkg: $v.packageName, title: $v.title, disclosureTime: (datefield), epoch: $epoch}
               ]' reports/snyk-sca.json
           )
 
           if [ "$violations" != "[]" ]; then
-            echo "::error::SCA violations beyond ${{ env.GRACE_PERIOD_DAYS }} day(s):"
+            echo "::error::SCA findings older than ${{ env.GRACE_PERIOD_DAYS }} day(s):"
             echo "$violations"
             exit 1
           fi
-          echo "SCA within grace or below threshold."
+          echo "SCA OK (all findings are new / within grace)."
 
-      # Send snapshot to Snyk UI tagged by branch
+      # Optional snapshot to Snyk UI (tagged by branch)
       - name: Snyk monitor (SCA) -> UI (by branch)
         if: always()
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk monitor --all-projects \
-            --target-reference="${{ github.ref_name }}" || true
+          snyk monitor --all-projects --target-reference="${{ github.ref_name }}" || true
 
       - name: Upload SCA reports
         uses: actions/upload-artifact@v4
@@ -103,6 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
+      # --- Setup -------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -112,6 +106,7 @@ jobs:
       - name: Install snyk-to-html
         run: npm install -g snyk-to-html
 
+      # --- Scan (SAST) -------------------------------------------------------
       - name: Snyk Code test -> JSON/HTML (local reports)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -125,11 +120,11 @@ jobs:
             echo "<html><body><h3>No Snyk Code issues found</h3></body></html>" > reports/snyk-code.html
           fi
 
-      # --- Grace period check (SAST) ------------------------------------------
+      # --- Grace period check (SAST) -----------------------------------------
       # Policy (SAST):
-      # - Use project identification dates: firstSeen (preferred) -> introducedDate (fallback)
+      # - Use project identification dates: firstSeen (fallback: introducedDate)
       # - cutoff = today - GRACE_PERIOD_DAYS
-      # - Block if: severity >= threshold AND firstSeen <= cutoff
+      # - Block if: firstSeen <= cutoff (older than grace)
       - name: Grace period check (SAST)
         run: |
           set -euo pipefail
@@ -140,35 +135,28 @@ jobs:
 
           cutoff=$(date -d "-${{ env.GRACE_PERIOD_DAYS }} days" +%s)
           cutoff_iso=$(date -u -d "@$cutoff" +"%Y-%m-%dT%H:%M:%SZ")
-
-          case "${{ env.SEVERITY_THRESHOLD }}" in
-            low) thr=0;; medium) thr=1;; high) thr=2;; critical) thr=3;; *) thr=2;;
-          esac
-          echo "SAST cutoff: $cutoff_iso (epoch=$cutoff) | threshold=${{ env.SEVERITY_THRESHOLD }}"
+          echo "SAST cutoff: $cutoff_iso (epoch=$cutoff)"
 
           violations=$(
             jq -r \
-              --argjson cutoff "$cutoff" \
-              --argjson thr "$thr" '
-              def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
-              # Snyk Code usually lacks disclosureTime; use project dates
+              --argjson cutoff "$cutoff" '
+              # reference date for grace: when THIS project first saw the issue
               def datefield: (.firstSeen // .introducedDate // "");
               [
                 .issues[]?
-                | select(sevscore >= $thr)
                 | . as $i
                 | ( (datefield | gsub("\\.[0-9]+Z$"; "Z")) | fromdateiso8601? ) as $epoch
                 | select($epoch != null and $epoch <= $cutoff)
-                | {sev: $i.severity, rule: $i.ruleId, title: $i.title, firstSeen: (datefield), epoch: $epoch}
+                | {rule: $i.ruleId, title: $i.title, firstSeen: (datefield), epoch: $epoch}
               ]' reports/snyk-code.json
           )
 
           if [ "$violations" != "[]" ]; then
-            echo "::error::SAST violations beyond ${{ env.GRACE_PERIOD_DAYS }} day(s):"
+            echo "::error::SAST findings older than ${{ env.GRACE_PERIOD_DAYS }} day(s):"
             echo "$violations"
             exit 1
           fi
-          echo "SAST within grace or below threshold."
+          echo "SAST OK (all findings are new / within grace)."
 
       - name: Upload Code reports
         uses: actions/upload-artifact@v4
