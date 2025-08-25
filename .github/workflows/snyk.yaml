@@ -1,11 +1,16 @@
 name: Security Pipeline
 
 on:
-  push: # roda em todas as branches
-  pull_request: # e em PRs
+  push:
+  pull_request:
 
 permissions:
   contents: read
+
+env:
+  SEVERITY_THRESHOLD: medium # low|medium|high|critical
+  GRACE_PERIOD_DAYS: "1" # dias de carência
+  VERBOSE: "1" # 1=logs detalhados; 0=silencioso
 
 jobs:
   snyk-sca:
@@ -27,24 +32,93 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           mkdir -p reports
-          snyk test --all-projects --severity-threshold=medium \
+          snyk test --all-projects --severity-threshold=${{ env.SEVERITY_THRESHOLD }} \
             --json-file-output=reports/snyk-sca.json || true
           snyk-to-html -i reports/snyk-sca.json -o reports/snyk-sca.html || true
 
-      # >>> envia snapshot pro Snyk UI e marca por branch <<<
+      # >>> BLOQUEIA somente se issues >= threshold estiverem FORA do período de carência <<<
+      - name: Grace period check (SCA)
+        run: |
+          [ "${{ env.VERBOSE }}" = "1" ] && set -x || true
+          set -euo pipefail
+          [ -f reports/snyk-sca.json ] || { echo "No SCA JSON found."; exit 0; }
+
+          cutoff_epoch=$(date -d "-${{ env.GRACE_PERIOD_DAYS }} days" +%s)
+          cutoff_iso=$(date -u -d "@$cutoff_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+
+          case "${{ env.SEVERITY_THRESHOLD }}" in
+            low) thr=0;; medium) thr=1;; high) thr=2;; critical) thr=3;; *) thr=2;;
+          esac
+
+          echo "---- SCA grace check ----"
+          echo "Grace period: ${{ env.GRACE_PERIOD_DAYS }} day(s)"
+          echo "Severity threshold: '${{ env.SEVERITY_THRESHOLD }}' -> score=$thr (low=0, medium=1, high=2, critical=3)"
+          echo "Cutoff: ISO=$cutoff_iso | epoch=$cutoff_epoch"
+          echo "Input: reports/snyk-sca.json"
+
+          # Avalia todas as vulns com campos calculados + decisão
+          jq \
+            --argjson cutoff "$cutoff_epoch" \
+            --argjson thr "$thr" '
+            def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
+            def firstdate: (.introducedDate // .firstSeen // .creationTime // .disclosureTime // .publicationTime // .updated);
+            [.vulnerabilities[]?
+              | . as $v
+              | {
+                  severity: ($v.severity // null),
+                  severity_score: (sevscore),
+                  at_or_above_threshold: (sevscore >= $thr),
+                  package: ($v.packageName // null),
+                  title: ($v.title // null),
+                  chosen_date: ( $v | firstdate // null ),
+                  epoch: ( ($v | firstdate // null)
+                           | if .==null then null else ( gsub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? ) end ),
+                  cutoff: $cutoff
+                }
+              | .older_than_cutoff = ( .epoch != null and .epoch <= $cutoff )
+              | .decision =
+                  ( if .severity_score < $thr then "BELOW_THRESHOLD"
+                    elif .epoch == null then "NO_DATE"
+                    elif .older_than_cutoff then "VIOLATION"
+                    else "IN_GRACE"
+                    end )
+            ]' reports/snyk-sca.json | tee reports/snyk-sca-evaluated.json > /dev/null
+
+          # Arquivos de debug e violações
+          jq -r '.[] | @json' reports/snyk-sca-evaluated.json > reports/snyk-sca-debug.ndjson
+          jq '[ .[] | select(.decision == "VIOLATION") ]' reports/snyk-sca-evaluated.json > reports/snyk-sca-violations.json
+
+          echo "--- Decision summary (SCA) ---"
+          jq -r '
+            group_by(.decision)
+            | map({decision: .[0].decision, count: length})
+            | .[] | "- \(.decision): \(.count)"
+          ' reports/snyk-sca-evaluated.json
+
+          [ "${{ env.VERBOSE }}" = "1" ] && { echo "--- First 10 evaluated rows ---"; head -n 10 reports/snyk-sca-debug.ndjson; } || true
+
+          if [ "$(jq 'length' reports/snyk-sca-violations.json)" -gt 0 ]; then
+            echo "::error::SCA violations beyond ${{ env.GRACE_PERIOD_DAYS }} day(s) detected."
+            jq -r '.[] | "- \(.severity|ascii_upcase) \(.package): \(.title) | date=\(.chosen_date) | epoch=\(.epoch)"' reports/snyk-sca-violations.json
+            exit 1
+          fi
+          echo "SCA OK: only IN_GRACE / BELOW_THRESHOLD / NO_DATE (non-blocking)."
+
       - name: Snyk monitor (SCA) -> UI (by branch)
         if: always()
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk monitor --all-projects \
-            --target-reference="${{ github.ref_name }}" || true
+          snyk monitor --all-projects --target-reference="${{ github.ref_name }}" || true
 
       - name: Upload SCA reports
         uses: actions/upload-artifact@v4
         with:
           name: snyk-sca-reports
-          path: reports/*sca.*
+          path: |
+            reports/*sca.*
+            reports/snyk-sca-*.json
+            reports/snyk-sca-*.ndjson
 
   snyk-code:
     name: Snyk Code (SAST)
@@ -65,7 +139,7 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           mkdir -p reports
-          snyk code test --severity-threshold=medium \
+          snyk code test --severity-threshold=${{ env.SEVERITY_THRESHOLD }} \
             --json-file-output=reports/snyk-code.json || true
           if [ -f reports/snyk-code.json ]; then
             snyk-to-html -i reports/snyk-code.json -o reports/snyk-code.html
@@ -73,8 +147,78 @@ jobs:
             echo "<html><body><h3>No Snyk Code issues found</h3></body></html>" > reports/snyk-code.html
           fi
 
+      # >>> BLOQUEIA somente se issues >= threshold estiverem FORA do período de carência <<<
+      - name: Grace period check (SAST)
+        run: |
+          [ "${{ env.VERBOSE }}" = "1" ] && set -x || true
+          set -euo pipefail
+          [ -f reports/snyk-code.json ] || { echo "No SAST JSON found."; exit 0; }
+
+          cutoff_epoch=$(date -d "-${{ env.GRACE_PERIOD_DAYS }} days" +%s)
+          cutoff_iso=$(date -u -d "@$cutoff_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+
+          case "${{ env.SESeverity_THRESHOLD }}" in
+            low) thr=0;; medium) thr=1;; high) thr=2;; critical) thr=3;; *) thr=2;;
+          esac
+
+          echo "---- SAST grace check ----"
+          echo "Grace period: ${{ env.GRACE_PERIOD_DAYS }} day(s)"
+          echo "Severity threshold: '${{ env.SEVERITY_THRESHOLD }}' -> score=$thr (low=0, medium=1, high=2, critical=3)"
+          echo "Cutoff: ISO=$cutoff_iso | epoch=$cutoff_epoch"
+          echo "Input: reports/snyk-code.json"
+
+          jq \
+            --argjson cutoff "$cutoff_epoch" \
+            --argjson thr "$thr" '
+            def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
+            def firstdate: (.introducedDate // .firstSeen // .creationTime // .disclosureTime // .publicationTime // .updated);
+            [.issues[]?
+              | . as $i
+              | {
+                  severity: ($i.severity // null),
+                  severity_score: (sevscore),
+                  at_or_above_threshold: (sevscore >= $thr),
+                  rule: ($i.ruleId // null),
+                  title: ($i.title // null),
+                  chosen_date: ( $i | firstdate // null ),
+                  epoch: ( ($i | firstdate // null)
+                           | if .==null then null else ( gsub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? ) end ),
+                  cutoff: $cutoff
+                }
+              | .older_than_cutoff = ( .epoch != null and .epoch <= $cutoff )
+              | .decision =
+                  ( if .severity_score < $thr then "BELOW_THRESHOLD"
+                    elif .epoch == null then "NO_DATE"
+                    elif .older_than_cutoff then "VIOLATION"
+                    else "IN_GRACE"
+                    end )
+            ]' reports/snyk-code.json | tee reports/snyk-code-evaluated.json > /dev/null
+
+          jq -r '.[] | @json' reports/snyk-code-evaluated.json > reports/snyk-code-debug.ndjson
+          jq '[ .[] | select(.decision == "VIOLATION") ]' reports/snyk-code-evaluated.json > reports/snyk-code-violations.json
+
+          echo "--- Decision summary (SAST) ---"
+          jq -r '
+            group_by(.decision)
+            | map({decision: .[0].decision, count: length})
+            | .[] | "- \(.decision): \(.count)"
+          ' reports/snyk-code-evaluated.json
+
+          [ "${{ env.VERBOSE }}" = "1" ] && { echo "--- First 10 evaluated rows ---"; head -n 10 reports/snyk-code-debug.ndjson; } || true
+
+          if [ "$(jq 'length' reports/snyk-code-violations.json)" -gt 0 ]; then
+            echo "::error::SAST violations beyond ${{ env.GRACE_PERIOD_DAYS }} day(s) detected."
+            jq -r '.[] | "- \(.severity|ascii_upcase) \(.rule): \(.title) | date=\(.chosen_date) | epoch=\(.epoch)"' reports/snyk-code-violations.json
+            exit 1
+          fi
+          echo "SAST OK: only IN_GRACE / BELOW_THRESHOLD / NO_DATE (non-blocking)."
+
       - name: Upload Code reports
         uses: actions/upload-artifact@v4
         with:
           name: snyk-code-reports
-          path: reports/*code.*
+          # inclui os arquivos de debug também
+          path: |
+            reports/*code.*
+            reports/snyk-code-*.json
+            reports/snyk-code-*.ndjson
