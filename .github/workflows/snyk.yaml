@@ -1,15 +1,16 @@
 name: Security Pipeline
 
 on:
-  push:
-  pull_request:
+  push: # run on every branch
+  pull_request: # and on PRs
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
   SEVERITY_THRESHOLD: medium # low|medium|high|critical
-  GRACE_PERIOD_DAYS: "15" # grace window (days) for issues first seen by THIS pipeline
+  GRACE_PERIOD_DAYS: "14" # grace window for newly found issues in THIS project
 
 jobs:
   snyk-sca:
@@ -17,7 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      # --- Setup -------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -27,23 +27,6 @@ jobs:
       - name: Install snyk-to-html
         run: npm install -g snyk-to-html
 
-      # --- Cache "first-seen by pipeline" map (SCA) --------------------------
-      # We persist a JSON map of issueKey -> firstSeenEpoch across runs.
-      - name: Restore SCA first-seen cache
-        id: cache-sca
-        uses: actions/cache@v4
-        with:
-          path: .cache/sca-first-seen.json
-          key: sca-first-seen-${{ github.ref_name }}
-          restore-keys: |
-            sca-first-seen-
-
-      - name: Init SCA first-seen file if missing
-        run: |
-          mkdir -p .cache
-          [ -f .cache/sca-first-seen.json ] || echo '{}' > .cache/sca-first-seen.json
-
-      # --- Scan (SCA) --------------------------------------------------------
       - name: Snyk test (SCA) -> JSON
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -53,100 +36,74 @@ jobs:
             --json-file-output=reports/snyk-sca.json || true
           snyk-to-html -i reports/snyk-sca.json -o reports/snyk-sca.html || true
 
-      # --- Grace check using pipeline-first-seen (SCA) -----------------------
+      # --- Grace period check (SCA) -------------------------------------------
       # Policy:
-      # 1) Build a current set of issues (>= threshold) with keys id|packageName.
-      # 2) Merge with the persisted first-seen map: keep the earliest epoch (old or now).
-      # 3) Block iff firstSeenEpoch <= cutoff (today - GRACE_PERIOD_DAYS).
+      # - Use ONLY project identification dates: firstSeen (preferred) -> introducedDate (fallback).
+      # - cutoff = today - GRACE_PERIOD_DAYS
+      # - Block if: severity >= threshold AND firstSeen <= cutoff (older than grace).
       - name: Grace period check (SCA)
         run: |
           set -euo pipefail
-          [ -f reports/snyk-sca.json ] || { echo "No SCA JSON found."; exit 0; }
+          if [ ! -f reports/snyk-sca.json ]; then
+            echo "No SCA JSON found (reports/snyk-sca.json)."
+            exit 0
+          fi
 
-          now=$(date +%s)
           cutoff=$(date -d "-${{ env.GRACE_PERIOD_DAYS }} days" +%s)
           cutoff_iso=$(date -u -d "@$cutoff" +"%Y-%m-%dT%H:%M:%SZ")
+
           case "${{ env.SEVERITY_THRESHOLD }}" in
             low) thr=0;; medium) thr=1;; high) thr=2;; critical) thr=3;; *) thr=2;;
           esac
           echo "SCA cutoff: $cutoff_iso (epoch=$cutoff) | threshold=${{ env.SEVERITY_THRESHOLD }}"
 
-          # (1) Current issues (>= threshold) as an object: { "key": now, ... }
-          # key = "id|packageName". We don't trust dates in Snyk JSON for grace,
-          # we trust when the PIPELINE first saw it (now).
-          jq -r --argjson now "$now" --argjson thr "$thr" '
-            def sev: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
-            reduce ( .vulnerabilities[]?
-                     | select(sev >= $thr)
-                     | (.id + "|" + .packageName) ) as $k
-                   ({}; .[$k] = $now)
-          ' reports/snyk-sca.json > reports/sca-current.json
-
-          # (2) Merge with persisted first-seen map: keep the earliest timestamp.
-          # updated = old; for each key in current, set old[key] = old[key] or now
-          jq -s '
-            def merge_first_seen:
-              . as [$curr, $old]
-              | ($old // {}) as $old
-              | reduce ($curr|to_entries[]) as $e ($old;
-                  .[$e.key] = ( .[$e.key] // $e.value )
-                );
-            merge_first_seen
-          ' reports/sca-current.json .cache/sca-first-seen.json > .cache/sca-first-seen.json.tmp
-          mv .cache/sca-first-seen.json.tmp .cache/sca-first-seen.json
-
-          # (3) Violations: current issues whose firstSeenEpoch <= cutoff
           violations=$(
-            jq -r --argjson cutoff "$cutoff" --slurpfile seen .cache/sca-first-seen.json '
-              [ inputs.vulnerabilities[]? ] as $vulns
-              | $vulns
-              | map({
-                  key: (.id + "|" + .packageName),
-                  sev: .severity,
-                  pkg: .packageName,
-                  title: .title
-                })
-              | map(select(
-                  {"low":0,"medium":1,"high":2,"critical":3}[.sev] 
-                  >= (env.thr|tonumber? // 1) # not used here; we already filtered, but keep safe
-                ))
-              | map(
-                  .fs := ($seen[0][.key] // null)
-                  | select(.fs != null and .fs <= ($cutoff))
-                  | "- \(.sev|ascii_upcase) \(.pkg): \(.title) | pipelineFirstSeenEpoch=\(.fs)"
-                )
-            ' reports/snyk-sca.json
+            jq -r \
+              --argjson cutoff "$cutoff" \
+              --argjson thr "$thr" '
+              # map textual severity to numeric
+              def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
+              # ONLY project dates (no public disclosure dates)
+              def datefield: (.firstSeen // .introducedDate // "");
+              [
+                .vulnerabilities[]?
+                | select(sevscore >= $thr)
+                | . as $v
+                # strip milliseconds like ".123Z", parse to epoch (null if missing/invalid)
+                | ( (datefield | gsub("\\.[0-9]+Z$"; "Z")) | fromdateiso8601? ) as $epoch
+                # older than grace -> violation
+                | select($epoch != null and $epoch <= $cutoff)
+                | {sev: $v.severity, pkg: $v.packageName, title: $v.title, firstSeen: (datefield), epoch: $epoch}
+              ]' reports/snyk-sca.json
           )
 
-          if [ -n "$violations" ] && [ "$violations" != "[]" ]; then
-            echo "::error::SCA violations beyond ${{ env.GRACE_PERIOD_DAYS }} day(s):"
+          if [ "$violations" != "[]" ]; then
+            echo "::error::SCA violations beyond ${{ env.GRACE_PERIOD_DAYS }} days:"
             echo "$violations"
             exit 1
           fi
-          echo "SCA OK (new/in-grace or below threshold)."
+          echo "SCA within grace or below threshold."
 
-      # Snapshot to Snyk UI (tagged by branch)
+      # Send snapshot to Snyk UI tagged by branch
       - name: Snyk monitor (SCA) -> UI (by branch)
         if: always()
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk monitor --all-projects --target-reference="${{ github.ref_name }}" || true
+          snyk monitor --all-projects \
+            --target-reference="${{ github.ref_name }}" || true
 
       - name: Upload SCA reports
         uses: actions/upload-artifact@v4
         with:
           name: snyk-sca-reports
-          path: |
-            reports/*sca.*
-            .cache/sca-first-seen.json
+          path: reports/*sca.*
 
   snyk-code:
     name: Snyk Code (SAST)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      # --- Setup -------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -156,22 +113,6 @@ jobs:
       - name: Install snyk-to-html
         run: npm install -g snyk-to-html
 
-      # --- Cache "first-seen by pipeline" map (SAST) -------------------------
-      - name: Restore SAST first-seen cache
-        id: cache-sast
-        uses: actions/cache@v4
-        with:
-          path: .cache/code-first-seen.json
-          key: code-first-seen-${{ github.ref_name }}
-          restore-keys: |
-            code-first-seen-
-
-      - name: Init SAST first-seen file if missing
-        run: |
-          mkdir -p .cache
-          [ -f .cache/code-first-seen.json ] || echo '{}' > .cache/code-first-seen.json
-
-      # --- Scan (SAST) -------------------------------------------------------
       - name: Snyk Code test -> JSON/HTML (local reports)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -185,73 +126,49 @@ jobs:
             echo "<html><body><h3>No Snyk Code issues found</h3></body></html>" > reports/snyk-code.html
           fi
 
-      # --- Grace check using pipeline-first-seen (SAST) ----------------------
+      # --- Grace period check (SAST) ------------------------------------------
+      # Same policy as SCA, using firstSeen -> introducedDate when available.
       - name: Grace period check (SAST)
         run: |
           set -euo pipefail
-          [ -f reports/snyk-code.json ] || { echo "No SAST JSON found."; exit 0; }
+          if [ ! -f reports/snyk-code.json ]; then
+            echo "No SAST JSON found (reports/snyk-code.json)."
+            exit 0
+          fi
 
-          now=$(date +%s)
           cutoff=$(date -d "-${{ env.GRACE_PERIOD_DAYS }} days" +%s)
           cutoff_iso=$(date -u -d "@$cutoff" +"%Y-%m-%dT%H:%M:%SZ")
+
           case "${{ env.SEVERITY_THRESHOLD }}" in
             low) thr=0;; medium) thr=1;; high) thr=2;; critical) thr=3;; *) thr=2;;
           esac
           echo "SAST cutoff: $cutoff_iso (epoch=$cutoff) | threshold=${{ env.SEVERITY_THRESHOLD }}"
 
-          # Current issues (>= threshold) as { "key": now, ... }
-          # Key choice for SAST (simple): ruleId|title (you can refine later to include file/fingerprint).
-          jq -r --argjson now "$now" --argjson thr "$thr" '
-            def sev: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
-            reduce ( .issues[]?
-                     | select(sev >= $thr)
-                     | (.ruleId + "|" + (.title // "")) ) as $k
-                   ({}; .[$k] = $now)
-          ' reports/snyk-code.json > reports/code-current.json
-
-          # Merge into persisted first-seen map (keep earliest)
-          jq -s '
-            def merge_first_seen:
-              . as [$curr, $old]
-              | ($old // {}) as $old
-              | reduce ($curr|to_entries[]) as $e ($old;
-                  .[$e.key] = ( .[$e.key] // $e.value )
-                );
-            merge_first_seen
-          ' reports/code-current.json .cache/code-first-seen.json > .cache/code-first-seen.json.tmp
-          mv .cache/code-first-seen.json.tmp .cache/code-first-seen.json
-
-          # Violations: current issues whose pipeline-first-seen <= cutoff
           violations=$(
-            jq -r --argjson cutoff "$cutoff" --slurpfile seen .cache/code-first-seen.json '
-              [ inputs.issues[]? ] as $issues
-              | $issues
-              | map({
-                  key: (.ruleId + "|" + (.title // "")),
-                  sev: .severity,
-                  rid: .ruleId,
-                  title: .title
-                })
-              | map(select({"low":0,"medium":1,"high":2,"critical":3}[.sev] >= (env.thr|tonumber? // 1)))
-              | map(
-                  .fs := ($seen[0][.key] // null)
-                  | select(.fs != null and .fs <= ($cutoff))
-                  | "- \(.sev|ascii_upcase) \(.rid): \(.title) | pipelineFirstSeenEpoch=\(.fs)"
-                )
-            ' reports/snyk-code.json
+            jq -r \
+              --argjson cutoff "$cutoff" \
+              --argjson thr "$thr" '
+              def sevscore: {"low":0,"medium":1,"high":2,"critical":3}[.severity];
+              def datefield: (.firstSeen // .introducedDate // "");
+              [
+                .issues[]?
+                | select(sevscore >= $thr)
+                | . as $i
+                | ( (datefield | gsub("\\.[0-9]+Z$"; "Z")) | fromdateiso8601? ) as $epoch
+                | select($epoch != null and $epoch <= $cutoff)
+                | {sev: $i.severity, rule: $i.ruleId, title: $i.title, firstSeen: (datefield), epoch: $epoch}
+              ]' reports/snyk-code.json
           )
 
-          if [ -n "$violations" ] && [ "$violations" != "[]" ]; then
-            echo "::error::SAST violations beyond ${{ env.GRACE_PERIOD_DAYS }} day(s):"
+          if [ "$violations" != "[]" ]; then
+            echo "::error::SAST violations beyond ${{ env.GRACE_PERIOD_DAYS }} days:"
             echo "$violations"
             exit 1
           fi
-          echo "SAST OK (new/in-grace or below threshold)."
+          echo "SAST within grace or below threshold."
 
       - name: Upload Code reports
         uses: actions/upload-artifact@v4
         with:
           name: snyk-code-reports
-          path: |
-            reports/*code.*
-            .cache/code-first-seen.json
+          path: reports/*code.*
