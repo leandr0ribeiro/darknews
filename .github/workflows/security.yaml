@@ -10,8 +10,8 @@ permissions:
 
 env:
   # 👇 ajustes simples pra testar
-  SEVERITY_THRESHOLD: medium     # low|medium|high|critical
-  GRACE_PERIOD_DAYS: "14"        # dias de carência para novas vulnerabilidades
+  SEVERITY_THRESHOLD: medium # low|medium|high|critical
+  GRACE_PERIOD_DAYS: "1" # dias de carência para novas vulnerabilidades
 
 jobs:
   snyk-sca:
