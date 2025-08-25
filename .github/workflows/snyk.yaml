@@ -10,7 +10,7 @@ permissions:
 
 env:
   SEVERITY_THRESHOLD: medium # low|medium|high|critical
-  GRACE_PERIOD_DAYS: "14" # grace window for newly found issues in THIS project
+  GRACE_PERIOD_DAYS: "1" # grace window for newly found issues in THIS project
 
 jobs:
   snyk-sca:
