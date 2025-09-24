@@ -35,7 +35,7 @@
     "node-pg-migrate": "7.9.1",
     "npm-check-updates": "^17.1.15",
     "pg": "8.14.0",
-    "react": "19.0.0",
+    "react": "19.1.1",
     "react-dom": "19.0.0",
     "swr": "^2.3.3",
     "uuid": "11.1.0"
